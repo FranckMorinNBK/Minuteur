@@ -72,22 +72,34 @@
   .display{
     flex:1; min-height:0; background:var(--card); border:1px solid var(--line);
     border-radius:22px; display:flex; flex-direction:column;
-    align-items:center; justify-content:center; gap:4px; padding-bottom:34px;
+    align-items:center; justify-content:center; gap:4px; padding-bottom:66px;
     position:relative; overflow:hidden;
     transition:background .15s;
   }
+
+  /* Jauges empilees en bas du cadran : temps de la periode, puis repetitions */
+  .gauges{
+    position:absolute; left:0; right:0; bottom:0;
+    display:flex; flex-direction:column; gap:6px;
+  }
+  #pct{
+    align-self:flex-end; margin-right:12px;
+    font-family:var(--num); font-size:13px; letter-spacing:.1em; color:var(--dim);
+    font-variant-numeric:tabular-nums;
+  }
+  .reps{display:flex; gap:2px; height:10px; margin:0 2px}
+  .reps[hidden]{display:none}
+  .reps .cell{flex:1 1 0; min-width:0; background:#20262d; border-radius:2px}
+  .reps .cell.on{background:var(--go)}
+  .reps.dense{display:block; background:#20262d; border-radius:2px; overflow:hidden}
+  .reps.dense .fill{display:block; height:100%; width:0%; background:var(--go)}
   .track{
-    position:absolute; left:0; right:0; bottom:0; height:22px; background:#20262d;
+    position:relative; height:22px; background:#20262d;
     border-top:1px solid var(--line);
   }
   .bar{
-    position:absolute; left:0; bottom:0; height:22px; width:0%;
+    position:absolute; left:0; top:0; bottom:0; width:0%;
     background:var(--accent); border-radius:0 3px 3px 0;
-  }
-  #pct{
-    position:absolute; right:12px; bottom:30px;
-    font-family:var(--num); font-size:13px; letter-spacing:.1em; color:var(--dim);
-    font-variant-numeric:tabular-nums;
   }
   #time{
     font-family:var(--num); font-size:clamp(76px,30vw,168px); font-weight:700;
@@ -115,6 +127,16 @@
     display:flex; align-items:center; gap:7px;
   }
   .opts input{width:17px; height:17px; accent-color:var(--accent)}
+  .opts label.off{opacity:.4}
+  .test{
+    font-family:var(--ui); font-size:13px; font-weight:600; color:var(--accent);
+    background:var(--card); border:1px solid var(--line); border-radius:999px;
+    padding:8px 14px;
+  }
+  #hint{
+    margin:0; text-align:center; font-size:12px; line-height:1.4; color:var(--dim);
+  }
+  #hint[hidden]{display:none}
   .controls{display:flex; gap:10px}
   .controls button{
     flex:1; height:68px; border:0; border-radius:18px;
@@ -174,15 +196,19 @@
 <div class="display" id="display">
   <div id="time">00:30</div>
   <div id="rounds">Répétition 0 / 8</div>
-  <div class="track"></div>
-  <div class="bar" id="bar"></div>
-  <div id="pct">0 %</div>
+  <div class="gauges">
+    <div id="pct">0 %</div>
+    <div class="reps" id="repsBar"></div>
+    <div class="track"><div class="bar" id="bar"></div></div>
+  </div>
 </div>
 
 <div class="opts">
   <label><input type="checkbox" id="cd" checked> Bips 3-2-1</label>
-  <label><input type="checkbox" id="vib" checked> Vibration</label>
+  <label id="vibWrap"><input type="checkbox" id="vib" checked> Vibration</label>
+  <button id="test" class="test">Tester le son</button>
 </div>
+<p id="hint" hidden>iPhone : coupe le mode Silencieux (bouton sur la tranche) et monte le volume.</p>
 
 <div class="controls">
   <button id="start">Démarrer</button>
@@ -194,52 +220,128 @@
   var $ = function(id){ return document.getElementById(id); };
   var minEl=$('min'), secEl=$('sec'), repsEl=$('reps'), repsInfEl=$('repsInf'),
       infBtn=$('inf'), timeEl=$('time'), roundsEl=$('rounds'), barEl=$('bar'),
-      pctEl=$('pct'), dispEl=$('display'), startBtn=$('start'), resetBtn=$('reset'),
-      cdEl=$('cd'), vibEl=$('vib');
+      pctEl=$('pct'), repsBarEl=$('repsBar'), dispEl=$('display'),
+      startBtn=$('start'), resetBtn=$('reset'), cdEl=$('cd'), vibEl=$('vib');
 
   var period=30000, total=8, infinite=false,
-      deadline=0, running=false, round=0, tick=null,
-      lastBeepSec=null, wakeLock=null;
+      deadline=0, repStart=0, running=false, paused=false, remaining=0,
+      round=0, tick=null, lastBeepSec=null, wakeLock=null;
 
-  /* ---------- Son ---------- */
-  var ac=null;
-  function audio(){
-    try{
-      if(!ac){
-        var Ctx = window.AudioContext || window.webkitAudioContext;
-        if(!Ctx) return null;
-        ac = new Ctx();
+  /* ---------- Son ----------
+     Les sons sont synthetises en WAV puis joues par des elements <audio> :
+     sur iOS, Web Audio est coupe par le bouton Silence de l'iPhone, alors que
+     la lecture d'un media ne l'est pas. */
+  var SND = {}, keepAlive = null;
+
+  function renderWav(notes){                     // notes : [{f, start, dur, gain}]
+    var sr = 22050, end = 0, i, n;
+    for(i = 0; i < notes.length; i++) end = Math.max(end, notes[i].start + notes[i].dur);
+    var len = Math.ceil((end + 0.05) * sr);
+    var buf = new Float32Array(len);
+
+    for(i = 0; i < notes.length; i++){
+      n = notes[i];
+      var s0 = Math.floor(n.start * sr), ns = Math.floor(n.dur * sr);
+      for(var k = 0; k < ns; k++){
+        var t = k / sr;
+        var env = Math.min(1, t / 0.006) * Math.exp(-t * 4 / n.dur);   // attaque courte, decroissance
+        buf[s0 + k] += Math.sin(2 * Math.PI * n.f * t) * n.gain * env;
       }
-      if(ac.state === 'suspended') ac.resume();
-      return ac;
-    }catch(e){ return null; }
+    }
+
+    var dv = new DataView(new ArrayBuffer(44 + len * 2));
+    function str(off, s){ for(var j = 0; j < s.length; j++) dv.setUint8(off + j, s.charCodeAt(j)); }
+    str(0, 'RIFF');  dv.setUint32(4, 36 + len * 2, true);   str(8, 'WAVEfmt ');
+    dv.setUint32(16, 16, true);      dv.setUint16(20, 1, true);   dv.setUint16(22, 1, true);
+    dv.setUint32(24, sr, true);      dv.setUint32(28, sr * 2, true);
+    dv.setUint16(32, 2, true);       dv.setUint16(34, 16, true);
+    str(36, 'data'); dv.setUint32(40, len * 2, true);
+    for(i = 0; i < len; i++){
+      var v = Math.max(-1, Math.min(1, buf[i]));            // ecretage
+      dv.setInt16(44 + i * 2, v * 32767, true);
+    }
+    return URL.createObjectURL(new Blob([dv.buffer], {type:'audio/wav'}));
   }
-  function beep(freq, dur, gain){
-    var c = audio(); if(!c) return;
+
+  /* Un seul element par son ne suffit pas : sur iOS, rejouer un element encore
+     en cours de lecture echoue silencieusement. Chaque son a donc un petit pool
+     d'elements utilises a tour de role. */
+  var POOL = 3;
+
+  function makeSound(notes){
+    var url = renderWav(notes), list = [], a;
+    for(var i = 0; i < POOL; i++){
+      a = new Audio(url);
+      a.preload = 'auto';
+      a.volume = 1;
+      a.setAttribute('playsinline', '');
+      list.push(a);
+    }
+    return {list:list, i:0};
+  }
+  function buildSounds(){
+    SND.tick  = makeSound([{f:880, start:0, dur:0.14, gain:0.55}]);
+    SND.end   = makeSound([{f:1320, start:0,    dur:0.25, gain:0.6},
+                           {f:1760, start:0.2,  dur:0.45, gain:0.6}]);
+    SND.final = makeSound([{f:660, start:0,    dur:0.5, gain:0.5},
+                           {f:523, start:0.32, dur:0.5, gain:0.5},
+                           {f:392, start:0.64, dur:1.4, gain:0.55},
+                           {f:262, start:0.66, dur:1.6, gain:0.4}]);
+
+    /* Piste silencieuse jouee en boucle pendant tout le minuteur : elle maintient
+       la session audio ouverte, sinon iOS la ferme apres quelques secondes et les
+       bips suivants sont avales. */
+    keepAlive = new Audio(renderWav([{f:1, start:0, dur:2, gain:0}]));
+    keepAlive.loop = true;
+    keepAlive.volume = 1;
+    keepAlive.setAttribute('playsinline', '');
+  }
+  function silentStart(a){          // lance une lecture en ignorant un refus
     try{
-    var t = c.currentTime;
-    var o = c.createOscillator(), g = c.createGain();
-    o.type = 'sine'; o.frequency.value = freq;
-    g.gain.setValueAtTime(0.0001, t);
-    g.gain.linearRampToValueAtTime(gain, t + 0.012);
-    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-    o.connect(g); g.connect(c.destination);
-    o.start(t); o.stop(t + dur + 0.03);
+      var p = a.play();
+      if(p && p.catch) p.catch(function(){});
     }catch(e){}
   }
-  function tickBeep(){ beep(880, 0.12, 0.35); }
-  function endBeep(){                 // fin d'une repetition : deux notes aigues
-    beep(1320, 0.22, 0.5);
-    setTimeout(function(){ beep(1760, 0.35, 0.5); }, 200);
+  function unlockSounds(){          // a appeler DANS un geste utilisateur (iOS)
+    /* iOS 16.4+ : sort l'appli de la categorie "ambiant", donc le son passe
+       meme quand le bouton Silencieux de l'iPhone est active. */
+    try{ if(navigator.audioSession) navigator.audioSession.type = 'playback'; }catch(e){}
+
+    for(var k in SND){
+      var list = SND[k].list;
+      for(var i = 0; i < list.length; i++){
+        try{
+          var a = list[i];
+          silentStart(a);
+          a.pause();
+          a.currentTime = 0;
+        }catch(e){}
+      }
+    }
   }
-  function finalBeep(){               // fin de serie : carillon grave descendant, plus long
-    beep(660, 0.5, 0.5);
-    setTimeout(function(){ beep(523, 0.5, 0.5); }, 320);
-    setTimeout(function(){ beep(392, 1.4, 0.55); }, 640);
-    setTimeout(function(){ beep(262, 1.6, 0.4); }, 660);
+  function holdSession(on){
+    if(!keepAlive) return;
+    if(on) silentStart(keepAlive);
+    else try{ keepAlive.pause(); }catch(e){}
   }
+  function play(name){
+    var s = SND[name]; if(!s) return;
+    var a = s.list[s.i];
+    s.i = (s.i + 1) % s.list.length;      // element suivant : jamais de collision
+    try{
+      if(a.currentTime) a.currentTime = 0;
+      silentStart(a);
+    }catch(e){}
+  }
+  function tickBeep(){ play('tick'); }
+  function endBeep(){ play('end'); }      // fin d'une repetition : deux notes aigues
+  function finalBeep(){ play('final'); }  // fin de serie : carillon grave descendant
+
+  var canVibrate = typeof navigator.vibrate === 'function';   // faux sur iOS
   function vibrate(pattern){
-    if(vibEl.checked && navigator.vibrate) navigator.vibrate(pattern);
+    if(canVibrate && vibEl.checked){
+      try{ navigator.vibrate(pattern); }catch(e){}
+    }
   }
 
   /* ---------- Ecran allume ---------- */
@@ -252,7 +354,7 @@
   }
   document.addEventListener('visibilitychange', function(){
     if(document.visibilityState === 'visible'){
-      if(running){ lockScreen(); audio(); }
+      if(running){ lockScreen(); holdSession(true); }   // iOS coupe les deux en arriere-plan
       render();
     }
   });
@@ -302,13 +404,68 @@
     var mm = Math.floor(t / 60), ss = t % 60;
     return (mm < 10 ? '0' : '') + mm + ':' + (ss < 10 ? '0' : '') + ss;
   }
+  /* ---------- Jauge des repetitions ---------- */
+  var CELLS_MAX = 40, repsCells = [], repsKey = '', paintKey = '';
+
+  function buildRepsBar(){
+    var key = infinite ? 'inf' : String(total);
+    if(key === repsKey) return;
+    repsKey = key; paintKey = '';
+    repsBarEl.innerHTML = '';
+    repsCells = [];
+    repsBarEl.hidden = infinite;
+    if(infinite) return;
+
+    if(total > CELLS_MAX){                    // trop de repetitions pour des segments
+      repsBarEl.classList.add('dense');
+      var f = document.createElement('span');
+      f.className = 'fill';
+      repsBarEl.appendChild(f);
+      repsCells = [f];
+      return;
+    }
+    repsBarEl.classList.remove('dense');
+    for(var i = 0; i < total; i++){
+      var c = document.createElement('span');
+      c.className = 'cell';
+      repsBarEl.appendChild(c);
+      repsCells.push(c);
+    }
+  }
+  function paintRepsBar(done){
+    if(infinite || !repsCells.length) return;
+
+    if(total > CELLS_MAX){
+      var p = (round + (running ? done : 0)) / total;
+      repsCells[0].style.width = Math.min(100, p * 100) + '%';
+      return;
+    }
+    var key = round + '|' + (running ? 1 : 0);
+    if(key !== paintKey){                     // les classes ne changent qu'au changement de repetition
+      paintKey = key;
+      for(var i = 0; i < repsCells.length; i++){
+        repsCells[i].className = i < round ? 'cell on' : 'cell';
+        repsCells[i].style.background = '';
+      }
+    }
+    if(running && round < repsCells.length){  // repetition en cours : remplissage partiel
+      var pc = Math.round(done * 100);
+      repsCells[round].style.background =
+        'linear-gradient(to right, var(--go) ' + pc + '%, #20262d ' + pc + '%)';
+    }
+  }
+
   function render(){
-    var left = running ? Math.max(0, deadline - Date.now()) : period;
-    var done = running ? (1 - left / period) : 0;
+    var live = running || paused;
+    var left = running ? Math.max(0, deadline - Date.now()) : (paused ? remaining : period);
+    var done = live ? Math.max(0, Math.min(1, 1 - left / period)) : 0;
     timeEl.textContent = fmt(left);
     barEl.style.width = (done * 100) + '%';
     pctEl.textContent = Math.round(done * 100) + ' %';
-    roundsEl.textContent = 'Répétition ' + round + (infinite ? '' : ' / ' + total);
+    roundsEl.textContent = 'Répétition ' + (live ? Math.min(round + 1, infinite ? round + 1 : total) : round)
+                         + (infinite ? '' : ' / ' + total);
+    buildRepsBar();
+    paintRepsBar(done);
     if(running && left <= 3000) dispEl.classList.add('warn');
     else dispEl.classList.remove('warn');
     document.title = running ? fmt(left) + ' - Minuteur' : "Minuteur d'exercice";
@@ -329,92 +486,161 @@
     }
 
     if(left <= 0){
-      round++;
+      /* Periodes entierement ecoulees pendant une mise en veille de l'onglet :
+         elles comptent, sinon la serie deraillerait au reveil. */
+      var extra = Math.floor((-left) / period);
+      round += 1 + extra;
+
       if(!infinite && round >= total){                        // fin de la serie
+        round = total;
         finalBeep(); vibrate([300, 120, 300, 120, 500]);
-        stop();
-        dispEl.classList.add('done');
-        barEl.style.width = '100%';
-        timeEl.textContent = fmt(0);
-        pctEl.textContent = 'Terminé';
-        roundsEl.textContent = 'Série terminée · ' + total + ' répétitions';
+        finish();
         return;
       }
       endBeep(); vibrate([120, 60, 120]); flash();
-      deadline += period;                                     // pas de derive cumulee
-      while(deadline - Date.now() <= 0) deadline += period;   // rattrapage si onglet endormi
+      repStart = deadline + extra * period;                  // pas de derive cumulee
+      deadline = repStart + period;
       lastBeepSec = null;
     }
     render();
   }
-  function start(){
-    clampInputs();
-    beep(660, 0.08, 0.25);            // debloque l'audio sur mobile (geste utilisateur)
-    dispEl.classList.remove('done');
-    running = true; round = 0; lastBeepSec = null;
-    deadline = Date.now() + period;
+  function run(){                     // (re)lance la boucle et tient la session audio
+    running = true;
+    lastBeepSec = null;
     startBtn.textContent = 'Pause'; startBtn.classList.add('running');
-    minEl.disabled = secEl.disabled = repsEl.disabled = true;
+    holdSession(true);
     lockScreen();
+    if(tick) clearInterval(tick);
     tick = setInterval(frame, 50);
     render();
   }
-  function stop(){
+  function halt(){                    // arrete la boucle, sans rien decider de l'etat
     running = false;
     if(tick){ clearInterval(tick); tick = null; }
-    startBtn.textContent = 'Démarrer'; startBtn.classList.remove('running');
-    minEl.disabled = secEl.disabled = repsEl.disabled = false;
+    startBtn.classList.remove('running');
     dispEl.classList.remove('warn');
+    holdSession(false);
     unlockScreen();
   }
+  function start(){
+    clampInputs();
+    unlockSounds(); tickBeep();       // debloque l'audio sur mobile (geste utilisateur)
+    dispEl.classList.remove('done');
+    paused = false; round = 0;
+    repStart = Date.now();
+    deadline = repStart + period;
+    run();
+  }
+  function pause(){
+    remaining = Math.max(0, deadline - Date.now());
+    paused = true;
+    halt();
+    startBtn.textContent = 'Reprendre';
+    render();
+  }
+  function resume(){                  // reprend la repetition en cours, sans repartir de zero
+    unlockSounds();                   // on est dans un geste utilisateur : on en profite
+    paused = false;
+    deadline = Date.now() + remaining;
+    repStart = deadline - period;
+    run();
+  }
+  function finish(){
+    halt();
+    paused = false;
+    startBtn.textContent = 'Démarrer';
+    dispEl.classList.add('done');
+    barEl.style.width = '100%';
+    paintRepsBar(1);
+    timeEl.textContent = fmt(0);
+    pctEl.textContent = 'Terminé';
+    roundsEl.textContent = 'Série terminée · ' + total + ' répétitions';
+    document.title = "Minuteur d'exercice";
+  }
   function reset(){
-    stop(); round = 0;
+    halt();
+    paused = false; remaining = 0; round = 0;
+    startBtn.textContent = 'Démarrer';
     dispEl.classList.remove('done');
     clampInputs(); render();
   }
 
   /* ---------- Evenements ---------- */
+
+  /* Tout reglage s'applique a chaud. La periode en cours n'est pas relancee :
+     son debut reste fixe, seule sa fin bouge, donc le temps deja ecoule compte. */
+  function applyEdit(){
+    clampInputs();
+    if(!running && !paused && dispEl.classList.contains('done')){
+      dispEl.classList.remove('done');    // regler apres une serie finie = en preparer une autre
+      round = 0;
+    }
+    if(running){
+      deadline = Math.max(repStart + period, Date.now() + 250);
+      lastBeepSec = null;
+    }else if(paused){
+      remaining = Math.min(remaining, period);
+    }
+    render();
+  }
+
   startBtn.addEventListener('click', function(){
-    if(running){ stop(); render(); } else { start(); }
+    if(running) pause();
+    else if(paused) resume();
+    else start();
   });
   resetBtn.addEventListener('click', reset);
 
   Array.prototype.forEach.call(document.querySelectorAll('[data-step]'), function(b){
     b.addEventListener('click', function(){
-      if(running) return;
       var which = b.getAttribute('data-step');
       if(which === 'reps' && infinite) return;
       var el = which === 'min' ? minEl : which === 'sec' ? secEl : repsEl;
       var v = (parseInt(el.value, 10) || 0) + parseInt(b.getAttribute('data-d'), 10);
       el.value = which === 'reps' ? Math.min(999, Math.max(1, v))
                                   : Math.min(59, Math.max(0, v));
-      clampInputs(); render();
+      applyEdit();
     });
   });
   Array.prototype.forEach.call(document.querySelectorAll('[data-preset]'), function(b){
     b.addEventListener('click', function(){
-      if(running) return;
       var t = parseInt(b.getAttribute('data-preset'), 10);
       minEl.value = Math.floor(t / 60);
       secEl.value = t % 60;
-      clampInputs(); render();
+      applyEdit();
     });
   });
   infBtn.addEventListener('click', function(){
-    if(running) return;
     infinite = !infinite;
-    clampInputs(); render();
+    applyEdit();
   });
 
   [minEl, secEl, repsEl].forEach(function(el){
-    el.addEventListener('change', function(){ clampInputs(); render(); });
+    el.addEventListener('change', applyEdit);
     el.addEventListener('focus', function(){ el.select(); });
   });
   [cdEl, vibEl].forEach(function(el){
     el.addEventListener('change', clampInputs);
   });
 
-  restore(); clampInputs(); render();
+  $('test').addEventListener('click', function(){
+    unlockSounds();
+    endBeep(); vibrate([120, 60, 120]);
+  });
+
+  /* iOS ne connait pas l'API Vibration : on le dit au lieu de laisser croire */
+  if(!canVibrate){
+    vibEl.checked = false;
+    vibEl.disabled = true;
+    $('vibWrap').classList.add('off');
+    $('vibWrap').lastChild.textContent = ' Vibration (non prise en charge ici)';
+  }
+  if(/iP(hone|od|ad)/.test(navigator.userAgent) ||
+     (navigator.maxTouchPoints > 1 && /Mac/.test(navigator.userAgent))){
+    $('hint').hidden = false;
+  }
+
+  buildSounds(); restore(); clampInputs(); render();
 })();
 </script>
 </body>
