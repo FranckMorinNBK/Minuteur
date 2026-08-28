@@ -36,37 +36,36 @@
   .field{
     flex:1 1 0; min-width:0;
     background:var(--card); border:1px solid var(--line); border-radius:16px;
-    padding:10px; text-align:center;
+    padding:8px; text-align:center;
+    display:flex; flex-direction:column; gap:6px;
   }
   .field.solo{flex:0 0 auto}
-  .field label{display:block; font-family:var(--num); font-size:12px; letter-spacing:.14em;
-    text-transform:uppercase; color:var(--dim); margin-bottom:6px}
-  .stepper{display:flex; align-items:center; justify-content:space-between; gap:6px; min-width:0}
+  .field label{font-family:var(--num); font-size:12px; letter-spacing:.14em;
+    text-transform:uppercase; color:var(--dim)}
+
+  /* La valeur occupe toute la largeur du champ : deux ou trois chiffres tiennent
+     meme sur un ecran de 320 px, ce qui n'etait pas le cas entre les deux boutons. */
+  .value{
+    width:100%; min-width:0; background:transparent; border:0; color:var(--txt);
+    font-family:var(--num); font-size:clamp(30px,9vw,40px); font-weight:600;
+    line-height:1.1; text-align:center; font-variant-numeric:tabular-nums;
+    -moz-appearance:textfield; padding:0;
+  }
+  .value::-webkit-outer-spin-button,
+  .value::-webkit-inner-spin-button{-webkit-appearance:none; margin:0}
+  .value:focus{outline:none}
+  #repsInf{color:var(--accent)}
+  #repsInf[hidden]{display:none}
+
+  .stepper{display:flex; gap:6px; min-width:0}
   .stepper button{
-    width:46px; height:46px; flex:0 0 46px; border-radius:12px;
+    flex:1 1 0; min-width:0; height:44px; border-radius:12px;
     background:#232833; color:var(--txt); border:1px solid var(--line);
     font-size:24px; line-height:1; font-weight:600;
   }
-  .stepper input{
-    flex:1 1 0; width:0; min-width:0; background:transparent; border:0; color:var(--txt);
-    font-family:var(--num); font-size:34px; font-weight:600; text-align:center;
-    font-variant-numeric:tabular-nums;
-    -moz-appearance:textfield;
-  }
-  .stepper input::-webkit-outer-spin-button,
-  .stepper input::-webkit-inner-spin-button{-webkit-appearance:none; margin:0}
-  .stepper input:focus{outline:none}
-  .stepper input:disabled{opacity:.5}
   .stepper button.off{opacity:.3}
-  .stepper .inf{
-    color:var(--dim); font-size:26px; font-weight:400;
-  }
+  .stepper .inf{color:var(--dim); font-size:26px; font-weight:400}
   .stepper .inf.on{background:var(--accent); border-color:var(--accent); color:#0b0d11}
-  #repsInf{
-    flex:1 1 0; font-family:var(--num); font-size:34px; font-weight:600;
-    color:var(--accent); text-align:center; line-height:46px;
-  }
-  #repsInf[hidden]{display:none}
 
   /* ---- Affichage ---- */
   .display{
@@ -115,11 +114,6 @@
   .display.done .bar{background:var(--go)}
 
   /* ---- Commandes ---- */
-  .presets{display:flex; gap:8px}
-  .presets button{
-    flex:1; height:38px; border-radius:12px; background:var(--card);
-    border:1px solid var(--line); color:var(--dim); font-size:13px; font-weight:600;
-  }
   .controls{display:flex; gap:10px}
   .controls button{
     flex:1; height:68px; border:0; border-radius:18px;
@@ -149,40 +143,32 @@
 
 <div class="setup">
   <div class="field">
-    <label>Minutes</label>
+    <label for="min">Minutes</label>
+    <input id="min" class="value" type="number" inputmode="numeric" min="0" max="59" value="0">
     <div class="stepper">
       <button data-step="min" data-d="-1" aria-label="moins une minute">&minus;</button>
-      <input id="min" type="number" inputmode="numeric" min="0" max="59" value="0">
       <button data-step="min" data-d="1" aria-label="plus une minute">+</button>
     </div>
   </div>
   <div class="field">
-    <label>Secondes</label>
+    <label for="sec">Secondes</label>
+    <input id="sec" class="value" type="number" inputmode="numeric" min="0" max="59" value="30">
     <div class="stepper">
       <button data-step="sec" data-d="-5" aria-label="moins cinq secondes">&minus;</button>
-      <input id="sec" type="number" inputmode="numeric" min="0" max="59" value="30">
       <button data-step="sec" data-d="5" aria-label="plus cinq secondes">+</button>
     </div>
   </div>
 </div>
 
 <div class="field solo">
-  <label>Répétitions</label>
+  <label for="reps">Répétitions</label>
+  <input id="reps" class="value" type="number" inputmode="numeric" min="1" max="999" value="8">
+  <span id="repsInf" class="value" hidden>&infin;</span>
   <div class="stepper">
     <button data-step="reps" data-d="-1" aria-label="une répétition de moins">&minus;</button>
-    <input id="reps" type="number" inputmode="numeric" min="1" max="999" value="8">
-    <span id="repsInf" hidden>&infin;</span>
     <button data-step="reps" data-d="1" aria-label="une répétition de plus">+</button>
     <button id="inf" class="inf" aria-pressed="false" aria-label="boucle infinie">&infin;</button>
   </div>
-</div>
-
-<div class="presets">
-  <button data-preset="20">20 s</button>
-  <button data-preset="30">30 s</button>
-  <button data-preset="45">45 s</button>
-  <button data-preset="60">1 min</button>
-  <button data-preset="90">1:30</button>
 </div>
 
 <div class="display" id="display">
@@ -610,14 +596,6 @@
       var v = (parseInt(el.value, 10) || 0) + parseInt(b.getAttribute('data-d'), 10);
       el.value = which === 'reps' ? Math.min(999, Math.max(1, v))
                                   : Math.min(59, Math.max(0, v));
-      applyEdit();
-    });
-  });
-  Array.prototype.forEach.call(document.querySelectorAll('[data-preset]'), function(b){
-    b.addEventListener('click', function(){
-      var t = parseInt(b.getAttribute('data-preset'), 10);
-      minEl.value = Math.floor(t / 60);
-      secEl.value = t % 60;
       applyEdit();
     });
   });
