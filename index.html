@@ -282,19 +282,26 @@
      Une seule lecture par periode : leur espacement est donc juste a l'echantillon
      pres, la ou quatre lectures separees accumulaient la gigue du minuteur et la
      latence variable de chaque demarrage. */
-  var CD = 3;                                    // debut du compte a rebours, en secondes
+  var CD = 3;      // debut du compte a rebours, en secondes avant la fin de periode
+  /* Silence de tete. Demarrer un element audio n'est pas instantane sur mobile
+     (decodage, reprise du peripherique) : ce retard decalait toute la sequence.
+     On lance donc le fichier PRE secondes plus tot, sur du silence, et la lecture
+     tourne deja a vitesse reelle quand arrive le premier top. */
+  var PRE = 1.2;
+
   function cycleNotes(withFinal){
-    var n = [{f:880, start:0, dur:0.14, gain:0.55},     // 3
-             {f:880, start:1, dur:0.14, gain:0.55},     // 2
-             {f:880, start:2, dur:0.14, gain:0.55}];    // 1
-    if(withFinal){                                       // 0 : carillon de fin de serie
-      n.push({f:660, start:CD,        dur:0.5, gain:0.5});
-      n.push({f:523, start:CD + 0.32, dur:0.5, gain:0.5});
-      n.push({f:392, start:CD + 0.64, dur:1.4, gain:0.55});
-      n.push({f:262, start:CD + 0.66, dur:1.6, gain:0.4});
-    }else{                                               // 0 : fin de periode
-      n.push({f:1320, start:CD,       dur:0.25, gain:0.6});
-      n.push({f:1760, start:CD + 0.2, dur:0.45, gain:0.6});
+    var z = PRE + CD;                                        // position du top 0
+    var n = [{f:880, start:PRE,     dur:0.14, gain:0.55},     // 3
+             {f:880, start:PRE + 1, dur:0.14, gain:0.55},     // 2
+             {f:880, start:PRE + 2, dur:0.14, gain:0.55}];    // 1
+    if(withFinal){                                            // 0 : carillon de fin de serie
+      n.push({f:660, start:z,        dur:0.5, gain:0.5});
+      n.push({f:523, start:z + 0.32, dur:0.5, gain:0.5});
+      n.push({f:392, start:z + 0.64, dur:1.4, gain:0.55});
+      n.push({f:262, start:z + 0.66, dur:1.6, gain:0.4});
+    }else{                                                    // 0 : fin de periode
+      n.push({f:1320, start:z,       dur:0.25, gain:0.6});
+      n.push({f:1760, start:z + 0.2, dur:0.45, gain:0.6});
     }
     return n;
   }
@@ -318,6 +325,12 @@
     keepAlive.volume = 1;
     keepAlive.setAttribute('playsinline', '');
   }
+  /* Jeton de propriete : une lecture reelle "prend" l'element, ce qui neutralise
+     le rappel de deverrouillage encore en attente sur ce meme element. */
+  function claim(a){
+    a.__tok = (a.__tok || 0) + 1;
+    return a.__tok;
+  }
   function silentStart(a){          // lance une lecture en ignorant un refus
     try{
       var p = a.play();
@@ -332,15 +345,27 @@
 
     for(var k in SND){
       var list = SND[k].list;
-      for(var i = 0; i < list.length; i++){
-        try{
-          var a = list[i];
-          silentStart(a);
-          a.pause();
-          a.currentTime = 0;
-        }catch(e){}
-      }
+      for(var i = 0; i < list.length; i++) unlockOne(list[i]);
     }
+  }
+
+  /* Deverrouillage silencieux. Un simple play() suivi de pause() laisse echapper
+     un fragment sonore sur mobile, ou play() est asynchrone : la lecture demarre
+     apres la pause. On coupe donc l'element le temps de l'operation, et on ne le
+     retablit qu'une fois la promesse de lecture resolue. */
+  function unlockOne(a){
+    var tok = claim(a);
+    try{
+      a.muted = true;
+      var restore = function(){
+        if(a.__tok !== tok) return;      // element repris entre-temps par une vraie lecture
+        try{ a.pause(); a.currentTime = 0; }catch(e){}
+        a.muted = false;
+      };
+      var p = a.play();
+      if(p && p.then) p.then(restore, restore);
+      else restore();
+    }catch(e){ a.muted = false; }
   }
   function paintSndBtn(){
     sndBtn.classList.toggle('off', !soundOn);
@@ -360,7 +385,9 @@
     var s = SND[name]; if(!s) return;
     var a = s.list[s.i];
     s.i = (s.i + 1) % s.list.length;      // element suivant : jamais de collision
+    claim(a);
     try{
+      a.muted = false;                    // au cas ou un deverrouillage l'ait coupe
       if(a.currentTime) a.currentTime = 0;
       silentStart(a);
     }catch(e){}
@@ -372,20 +399,55 @@
   /* Programme la sequence 3-2-1-0 de la periode en cours. `left` est le temps
      restant au moment ou on s'en apercoit : on demarre le fichier a la position
      correspondante, ce qui annule le retard de detection (au plus 50 ms). */
-  var armed = null;
+  var armed = null, syncLeft = 0, seekWait = 0, seekComp = 0.04;
   function armCycle(left){
     if(!soundOn) return false;
     var s = SND[(!infinite && round + 1 >= total) ? 'cycleFinal' : 'cycle'];
     if(!s) return false;
     var a = s.list[s.i];
     s.i = (s.i + 1) % s.list.length;
+    claim(a);
     try{
       a.pause();
-      a.currentTime = Math.max(0, (CD * 1000 - left) / 1000);
+      a.muted = false;
+      /* Position de depart dans le fichier. Elle vaut zero dans le cas normal :
+         on evite alors un seek, couteux et asynchrone sur mobile. */
+      var pos = (PRE + CD) - left / 1000;
+      if(pos > 0.02 || a.currentTime > 0.02) a.currentTime = Math.max(0, pos);
       silentStart(a);
       armed = a;
+      syncLeft = 6; seekWait = 0;         // recalages possibles, tous pendant le silence
       return true;
     }catch(e){ return false; }
+  }
+  /* Recalage : si la lecture a demarre en retard, on corrige la position pendant
+     le silence de tete, donc sans rien faire entendre. */
+  function syncCycle(left){
+    if(!armed) return;
+    var ideal = (PRE + CD) - left / 1000;
+    if(ideal < 0.15 || ideal > PRE - 0.12) return;      // hors du silence : on ne touche plus
+
+    var drift = armed.currentTime - ideal;              // negatif = lecture en retard
+
+    /* Un repositionnement n'est pas gratuit : il dure quelques dizaines de
+       millisecondes pendant lesquelles l'horloge avance, ce qui laissait un
+       retard residuel constant. On mesure ce cout apres coup et on vise
+       d'autant plus loin la fois suivante. L'appli s'etalonne ainsi sur
+       l'appareil, un telephone n'ayant pas la meme latence qu'un PC. */
+    if(seekWait > 0){
+      if(--seekWait === 0) seekComp = Math.min(0.3, Math.max(0, seekComp - drift));
+      return;
+    }
+    if(syncLeft > 0 && Math.abs(drift) > 0.02){
+      try{
+        armed.currentTime = ideal + seekComp;
+        /* Ne pas exiger que la lecture ait demarre : c'est justement quand elle
+           tarde que le recalage est necessaire. */
+        if(armed.paused) silentStart(armed);
+        syncLeft--;
+        seekWait = 3;
+      }catch(e){}
+    }
   }
   function disarmCycle(){
     if(armed){
@@ -553,8 +615,10 @@
       lastBeepSec = secLeft;
       vibrate(40);
     }
-    if(!cycleArmed && left > 0 && left <= CD * 1000){
+    if(!cycleArmed && left > 0 && left <= (PRE + CD) * 1000){
       cycleArmed = armCycle(left);
+    }else if(cycleArmed){
+      syncCycle(left);
     }
 
     if(left <= 0){
@@ -593,7 +657,7 @@
     holdSession(true);
     lockScreen();
     if(tick) clearInterval(tick);
-    tick = setInterval(frame, 50);
+    tick = setInterval(frame, 25);   // pas fin : borne le retard du top 0 et de la fin de periode
     render();
   }
   function halt(){                    // arrete la boucle, sans rien decider de l'etat
@@ -606,7 +670,7 @@
   }
   function start(){
     clampInputs();
-    unlockSounds(); tickBeep();       // debloque l'audio sur mobile (geste utilisateur)
+    unlockSounds();                   // debloque l'audio sur mobile (geste utilisateur)
     dispEl.classList.remove('done');
     paused = false; round = 0;
     cycleArmed = false; disarmCycle();
