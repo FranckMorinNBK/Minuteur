@@ -56,6 +56,8 @@
   .value:focus{outline:none}
   #repsInf{color:var(--accent)}
   #repsInf[hidden]{display:none}
+  #tot{color:var(--go)}
+  #tot.long{font-size:clamp(21px,6vw,28px); line-height:1.5}   /* h:mm:ss */
 
   .stepper{display:flex; gap:6px; min-width:0}
   .stepper button{
@@ -160,14 +162,24 @@
   </div>
 </div>
 
-<div class="field solo">
-  <label for="reps">Répétitions</label>
-  <input id="reps" class="value" type="number" inputmode="numeric" min="1" max="999" value="8">
-  <span id="repsInf" class="value" hidden>&infin;</span>
-  <div class="stepper">
-    <button data-step="reps" data-d="-1" aria-label="une répétition de moins">&minus;</button>
-    <button data-step="reps" data-d="1" aria-label="une répétition de plus">+</button>
-    <button id="inf" class="inf" aria-pressed="false" aria-label="boucle infinie">&infin;</button>
+<div class="setup">
+  <div class="field">
+    <label for="reps">Répétitions</label>
+    <input id="reps" class="value" type="number" inputmode="numeric" min="1" max="999" value="8">
+    <span id="repsInf" class="value" hidden>&infin;</span>
+    <div class="stepper">
+      <button data-step="reps" data-d="-1" aria-label="une répétition de moins">&minus;</button>
+      <button data-step="reps" data-d="1" aria-label="une répétition de plus">+</button>
+      <button id="inf" class="inf" aria-pressed="false" aria-label="boucle infinie">&infin;</button>
+    </div>
+  </div>
+  <div class="field">
+    <label>Temps total</label>
+    <div id="tot" class="value" aria-live="off">04:00</div>
+    <div class="stepper">
+      <button data-step="reps" data-d="-1" aria-label="une répétition de moins">&minus;</button>
+      <button data-step="reps" data-d="1" aria-label="une répétition de plus">+</button>
+    </div>
   </div>
 </div>
 
@@ -205,14 +217,14 @@
 (function(){
   var $ = function(id){ return document.getElementById(id); };
   var minEl=$('min'), secEl=$('sec'), repsEl=$('reps'), repsInfEl=$('repsInf'),
-      infBtn=$('inf'), timeEl=$('time'), roundsEl=$('rounds'), barEl=$('bar'),
+      infBtn=$('inf'), totEl=$('tot'), timeEl=$('time'), roundsEl=$('rounds'), barEl=$('bar'),
       pctEl=$('pct'), repsBarEl=$('repsBar'), dispEl=$('display'),
       startBtn=$('start'), resetBtn=$('reset'), sndBtn=$('snd');
 
   var soundOn = true;
   var period=30000, total=8, infinite=false,
       deadline=0, repStart=0, running=false, paused=false, remaining=0,
-      round=0, tick=null, lastBeepSec=null, wakeLock=null;
+      round=0, tick=null, lastBeepSec=null, cycleArmed=false, wakeLock=null;
 
   /* ---------- Son ----------
      Les sons sont synthetises en WAV puis joues par des elements <audio> :
@@ -255,9 +267,9 @@
      d'elements utilises a tour de role. */
   var POOL = 3;
 
-  function makeSound(notes){
+  function makeSound(notes, n){
     var url = renderWav(notes), list = [], a;
-    for(var i = 0; i < POOL; i++){
+    for(var i = 0; i < (n || POOL); i++){
       a = new Audio(url);
       a.preload = 'auto';
       a.volume = 1;
@@ -266,6 +278,27 @@
     }
     return {list:list, i:0};
   }
+  /* Les quatre tops (3, 2, 1, 0) tiennent dans UN seul fichier, aux decalages exacts.
+     Une seule lecture par periode : leur espacement est donc juste a l'echantillon
+     pres, la ou quatre lectures separees accumulaient la gigue du minuteur et la
+     latence variable de chaque demarrage. */
+  var CD = 3;                                    // debut du compte a rebours, en secondes
+  function cycleNotes(withFinal){
+    var n = [{f:880, start:0, dur:0.14, gain:0.55},     // 3
+             {f:880, start:1, dur:0.14, gain:0.55},     // 2
+             {f:880, start:2, dur:0.14, gain:0.55}];    // 1
+    if(withFinal){                                       // 0 : carillon de fin de serie
+      n.push({f:660, start:CD,        dur:0.5, gain:0.5});
+      n.push({f:523, start:CD + 0.32, dur:0.5, gain:0.5});
+      n.push({f:392, start:CD + 0.64, dur:1.4, gain:0.55});
+      n.push({f:262, start:CD + 0.66, dur:1.6, gain:0.4});
+    }else{                                               // 0 : fin de periode
+      n.push({f:1320, start:CD,       dur:0.25, gain:0.6});
+      n.push({f:1760, start:CD + 0.2, dur:0.45, gain:0.6});
+    }
+    return n;
+  }
+
   function buildSounds(){
     SND.tick  = makeSound([{f:880, start:0, dur:0.14, gain:0.55}]);
     SND.end   = makeSound([{f:1320, start:0,    dur:0.25, gain:0.6},
@@ -274,6 +307,8 @@
                            {f:523, start:0.32, dur:0.5, gain:0.5},
                            {f:392, start:0.64, dur:1.4, gain:0.55},
                            {f:262, start:0.66, dur:1.6, gain:0.4}]);
+    SND.cycle      = makeSound(cycleNotes(false), 2);
+    SND.cycleFinal = makeSound(cycleNotes(true), 2);
 
     /* Piste silencieuse jouee en boucle pendant tout le minuteur : elle maintient
        la session audio ouverte, sinon iOS la ferme apres quelques secondes et les
@@ -334,6 +369,31 @@
   function endBeep(){ play('end'); }      // fin d'une repetition : deux notes aigues
   function finalBeep(){ play('final'); }  // fin de serie : carillon grave descendant
 
+  /* Programme la sequence 3-2-1-0 de la periode en cours. `left` est le temps
+     restant au moment ou on s'en apercoit : on demarre le fichier a la position
+     correspondante, ce qui annule le retard de detection (au plus 50 ms). */
+  var armed = null;
+  function armCycle(left){
+    if(!soundOn) return false;
+    var s = SND[(!infinite && round + 1 >= total) ? 'cycleFinal' : 'cycle'];
+    if(!s) return false;
+    var a = s.list[s.i];
+    s.i = (s.i + 1) % s.list.length;
+    try{
+      a.pause();
+      a.currentTime = Math.max(0, (CD * 1000 - left) / 1000);
+      silentStart(a);
+      armed = a;
+      return true;
+    }catch(e){ return false; }
+  }
+  function disarmCycle(){
+    if(armed){
+      try{ armed.pause(); armed.currentTime = 0; }catch(e){}
+      armed = null;
+    }
+  }
+
   var canVibrate = typeof navigator.vibrate === 'function';   // faux sur iOS
   function vibrate(pattern){
     if(canVibrate){
@@ -377,6 +437,10 @@
     infBtn.classList.toggle('on', infinite);
     infBtn.setAttribute('aria-pressed', infinite ? 'true' : 'false');
 
+    var txt = infinite ? '∞' : fmtLong(period * total);
+    totEl.textContent = txt;
+    totEl.classList.toggle('long', txt.length > 5);
+
     try{
       localStorage.setItem('minuteur', JSON.stringify({
         m:m, s:s, r:r, inf:infinite, snd:soundOn
@@ -400,6 +464,12 @@
     var t = Math.max(0, Math.ceil(ms / 1000));
     var mm = Math.floor(t / 60), ss = t % 60;
     return (mm < 10 ? '0' : '') + mm + ':' + (ss < 10 ? '0' : '') + ss;
+  }
+  function fmtLong(ms){                    // duree totale : h:mm:ss au-dela d'une heure
+    var t = Math.round(ms / 1000);
+    var h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), s = t % 60;
+    var p = function(v){ return (v < 10 ? '0' : '') + v; };
+    return h ? h + ':' + p(m) + ':' + p(s) : p(m) + ':' + p(s);
   }
   /* ---------- Jauge des repetitions ---------- */
   var CELLS_MAX = 40, repsCells = [], repsKey = '', paintKey = '';
@@ -477,9 +547,14 @@
     var left = deadline - Date.now();
     var secLeft = Math.ceil(left / 1000);
 
+    /* Le son des tops est dans le fichier arme ci-dessous ; ici on ne pilote
+       plus que la vibration, qui ne peut pas etre pre-enregistree. */
     if(secLeft > 0 && secLeft <= 3 && secLeft !== lastBeepSec){
       lastBeepSec = secLeft;
-      tickBeep(); vibrate(40);
+      vibrate(40);
+    }
+    if(!cycleArmed && left > 0 && left <= CD * 1000){
+      cycleArmed = armCycle(left);
     }
 
     if(left <= 0){
@@ -488,13 +563,23 @@
       var extra = Math.floor((-left) / period);
       round += 1 + extra;
 
+      /* Le top 0 est deja dans le fichier arme ; on ne joue le son isole que si
+         rien n'a pu etre programme (onglet endormi, son rallume trop tard). */
+      var armedHere = cycleArmed;
+      cycleArmed = false;
+      armed = null;
+
       if(!infinite && round >= total){                        // fin de la serie
         round = total;
-        finalBeep(); vibrate([300, 120, 300, 120, 500]);
+        /* extra > 0 : le fichier arme etait celui d'une periode intermediaire,
+           il n'a donc pas joue le carillon de fin de serie. */
+        if(!armedHere || extra > 0) finalBeep();
+        vibrate([300, 120, 300, 120, 500]);
         finish();
         return;
       }
-      endBeep(); vibrate([120, 60, 120]); flash();
+      if(!armedHere) endBeep();
+      vibrate([120, 60, 120]); flash();
       repStart = deadline + extra * period;                  // pas de derive cumulee
       deadline = repStart + period;
       lastBeepSec = null;
@@ -524,6 +609,7 @@
     unlockSounds(); tickBeep();       // debloque l'audio sur mobile (geste utilisateur)
     dispEl.classList.remove('done');
     paused = false; round = 0;
+    cycleArmed = false; disarmCycle();
     repStart = Date.now();
     deadline = repStart + period;
     run();
@@ -531,6 +617,7 @@
   function pause(){
     remaining = Math.max(0, deadline - Date.now());
     paused = true;
+    cycleArmed = false; disarmCycle();
     halt();
     startBtn.textContent = 'Reprendre';
     render();
@@ -538,6 +625,7 @@
   function resume(){                  // reprend la repetition en cours, sans repartir de zero
     unlockSounds();                   // on est dans un geste utilisateur : on en profite
     paused = false;
+    cycleArmed = false;
     deadline = Date.now() + remaining;
     repStart = deadline - period;
     run();
@@ -556,6 +644,7 @@
   }
   function reset(){
     halt();
+    cycleArmed = false; disarmCycle();
     paused = false; remaining = 0; round = 0;
     startBtn.textContent = 'Démarrer';
     dispEl.classList.remove('done');
@@ -575,6 +664,7 @@
     if(running){
       deadline = Math.max(repStart + period, Date.now() + 250);
       lastBeepSec = null;
+      cycleArmed = false; disarmCycle();   // l'echeance a bouge : sequence a reprogrammer
     }else if(paused){
       remaining = Math.min(remaining, period);
     }
@@ -617,6 +707,7 @@
       if(running) holdSession(true);
       tickBeep();                     // confirmation audible du retour du son
     }else{
+      cycleArmed = false; disarmCycle();
       holdSession(false);
     }
     clampInputs();
