@@ -227,235 +227,158 @@
       round=0, tick=null, lastBeepSec=null, cycleArmed=false, wakeLock=null;
 
   /* ---------- Son ----------
-     Les sons sont synthetises en WAV puis joues par des elements <audio> :
-     sur iOS, Web Audio est coupe par le bouton Silence de l'iPhone, alors que
-     la lecture d'un media ne l'est pas. */
-  var SND = {}, keepAlive = null;
+     Les bips ne sont plus des fichiers joues par des elements <audio> : sur
+     iPhone, demarrer un media a une latence variable et s'y repositionner est
+     lent et approximatif, ce qui decalait la sequence. Ils sont desormais
+     synthetises et PROGRAMMES sur l'horloge de l'AudioContext, pilotee par le
+     materiel audio : une note demandee pour un instant donne sort a
+     l'echantillon pres, sans dependre de la regularite de JavaScript.
 
-  function renderWav(notes){                     // notes : [{f, start, dur, gain}]
-    var sr = 22050, end = 0, i, n;
-    for(i = 0; i < notes.length; i++) end = Math.max(end, notes[i].start + notes[i].dur);
-    var len = Math.ceil((end + 0.05) * sr);
-    var buf = new Float32Array(len);
+     Une piste silencieuse en boucle (element <audio>) tourne pendant tout le
+     minuteur : sur iPhone elle place la session audio en categorie "lecture",
+     ce qui rend le son audible malgre le bouton Silencieux, y compris sur les
+     versions anterieures a l'API audioSession. */
 
-    for(i = 0; i < notes.length; i++){
-      n = notes[i];
-      var s0 = Math.floor(n.start * sr), ns = Math.floor(n.dur * sr);
-      for(var k = 0; k < ns; k++){
-        var t = k / sr;
-        var env = Math.min(1, t / 0.006) * Math.exp(-t * 4 / n.dur);   // attaque courte, decroissance
-        buf[s0 + k] += Math.sin(2 * Math.PI * n.f * t) * n.gain * env;
+  var CD = 3;                         // nombre de tops avant la fin de periode
+  var ac = null, keepAlive = null, sched = [];
+
+  function audio(){
+    try{
+      if(!ac){
+        var Ctx = window.AudioContext || window.webkitAudioContext;
+        if(!Ctx) return null;
+        ac = new Ctx();
+      }
+      if(ac.state === 'suspended') ac.resume();
+      return ac;
+    }catch(e){ return null; }
+  }
+
+  /* Delai entre l'instant programme et la sortie reelle du haut-parleur : on le
+     retranche pour que le son soit ENTENDU au bon moment. */
+  function outLatency(){
+    if(!ac) return 0;
+    var l = (typeof ac.outputLatency === 'number' && ac.outputLatency) || ac.baseLatency || 0;
+    return (l > 0 && l < 0.4) ? l : 0;
+  }
+
+  /* Une note, programmee pour l'instant `at` de l'horloge audio. */
+  function tone(freq, at, dur, gain){
+    var c = audio(); if(!c) return;
+    try{
+      var t = Math.max(at, c.currentTime + 0.005);
+      var o = c.createOscillator(), g = c.createGain();
+      o.type = 'sine';
+      o.frequency.value = freq;
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(gain, t + 0.008);      // attaque nette
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dur);      // extinction douce
+      o.connect(g); g.connect(c.destination);
+      o.start(t);
+      o.stop(t + dur + 0.02);
+      o.__at = t;
+      sched.push(o);
+      o.onended = function(){
+        var i = sched.indexOf(o);
+        if(i >= 0) sched.splice(i, 1);
+      };
+    }catch(e){}
+  }
+
+  /* Annule les notes programmees. Par defaut on epargne celles deja commencees,
+     pour ne pas couper un signal en cours. */
+  function cancelTones(all){
+    if(!ac) return;
+    for(var i = sched.length - 1; i >= 0; i--){
+      var o = sched[i];
+      if(all || o.__at > ac.currentTime + 0.005){
+        try{ o.stop(); o.disconnect(); }catch(e){}
+        sched.splice(i, 1);
       }
     }
+  }
 
+  /* Les quatre motifs. `z` est l'instant du top zero sur l'horloge audio. */
+  function tickAt(z){   tone(880, z, 0.13, 0.32); }
+  function endAt(z){                                   // fin de periode
+    tone(1320, z,       0.22, 0.40);
+    tone(1760, z + 0.2, 0.40, 0.40);
+  }
+  function finalAt(z){                                 // fin de serie
+    tone(660, z,        0.45, 0.34);
+    tone(523, z + 0.32, 0.45, 0.34);
+    tone(392, z + 0.64, 1.30, 0.36);
+    tone(262, z + 0.66, 1.50, 0.26);
+  }
+  function beepNow(kind){
+    var c = audio(); if(!c || !soundOn) return;
+    var z = c.currentTime + 0.02;
+    if(kind === 'tick') tickAt(z);
+    else if(kind === 'final') finalAt(z);
+    else endAt(z);
+  }
+  function tickBeep(){ beepNow('tick'); }
+  function endBeep(){ beepNow('end'); }
+  function finalBeep(){ beepNow('final'); }
+
+  /* Programme d'un coup les tops 3, 2, 1 et 0 de la periode en cours.
+     `left` est le temps restant en millisecondes, lu dans la meme foulee que
+     l'horloge audio : les deux horloges sont donc mises en correspondance a
+     l'instant meme, et tout le reste est joue par le materiel. */
+  var LEAD = 5;                       // on programme quand il reste moins de 5 s
+  function armCycle(left){
+    var c = audio(); if(!c || !soundOn) return false;
+    var z = c.currentTime + left / 1000 - outLatency();
+    for(var k = CD; k >= 1; k--){
+      var t = z - k;
+      if(t > c.currentTime + 0.01) tickAt(t);
+    }
+    if(!infinite && round + 1 >= total) finalAt(z);
+    else endAt(z);
+    return true;
+  }
+  function disarmCycle(){ cancelTones(false); }
+
+  /* ---------- Session audio ----------
+     La piste silencieuse et la categorie "lecture" servent uniquement a ce que
+     le son soit audible sur iPhone ; elles ne portent aucun bip. */
+  function silentWav(sec){
+    var sr = 8000, len = Math.ceil(sec * sr);
     var dv = new DataView(new ArrayBuffer(44 + len * 2));
     function str(off, s){ for(var j = 0; j < s.length; j++) dv.setUint8(off + j, s.charCodeAt(j)); }
     str(0, 'RIFF');  dv.setUint32(4, 36 + len * 2, true);   str(8, 'WAVEfmt ');
     dv.setUint32(16, 16, true);      dv.setUint16(20, 1, true);   dv.setUint16(22, 1, true);
     dv.setUint32(24, sr, true);      dv.setUint32(28, sr * 2, true);
     dv.setUint16(32, 2, true);       dv.setUint16(34, 16, true);
-    str(36, 'data'); dv.setUint32(40, len * 2, true);
-    for(i = 0; i < len; i++){
-      var v = Math.max(-1, Math.min(1, buf[i]));            // ecretage
-      dv.setInt16(44 + i * 2, v * 32767, true);
-    }
+    str(36, 'data'); dv.setUint32(40, len * 2, true);        // le reste est deja a zero
     return URL.createObjectURL(new Blob([dv.buffer], {type:'audio/wav'}));
   }
-
-  /* Un seul element par son ne suffit pas : sur iOS, rejouer un element encore
-     en cours de lecture echoue silencieusement. Chaque son a donc un petit pool
-     d'elements utilises a tour de role. */
-  var POOL = 3;
-
-  function makeSound(notes, n){
-    var url = renderWav(notes), list = [], a;
-    for(var i = 0; i < (n || POOL); i++){
-      a = new Audio(url);
-      a.preload = 'auto';
-      a.volume = 1;
-      a.setAttribute('playsinline', '');
-      list.push(a);
-    }
-    return {list:list, i:0};
-  }
-  /* Les quatre tops (3, 2, 1, 0) tiennent dans UN seul fichier, aux decalages exacts.
-     Une seule lecture par periode : leur espacement est donc juste a l'echantillon
-     pres, la ou quatre lectures separees accumulaient la gigue du minuteur et la
-     latence variable de chaque demarrage. */
-  var CD = 3;      // debut du compte a rebours, en secondes avant la fin de periode
-  /* Silence de tete. Demarrer un element audio n'est pas instantane sur mobile
-     (decodage, reprise du peripherique) : ce retard decalait toute la sequence.
-     On lance donc le fichier PRE secondes plus tot, sur du silence, et la lecture
-     tourne deja a vitesse reelle quand arrive le premier top. */
-  var PRE = 1.2;
-
-  function cycleNotes(withFinal){
-    var z = PRE + CD;                                        // position du top 0
-    var n = [{f:880, start:PRE,     dur:0.14, gain:0.55},     // 3
-             {f:880, start:PRE + 1, dur:0.14, gain:0.55},     // 2
-             {f:880, start:PRE + 2, dur:0.14, gain:0.55}];    // 1
-    if(withFinal){                                            // 0 : carillon de fin de serie
-      n.push({f:660, start:z,        dur:0.5, gain:0.5});
-      n.push({f:523, start:z + 0.32, dur:0.5, gain:0.5});
-      n.push({f:392, start:z + 0.64, dur:1.4, gain:0.55});
-      n.push({f:262, start:z + 0.66, dur:1.6, gain:0.4});
-    }else{                                                    // 0 : fin de periode
-      n.push({f:1320, start:z,       dur:0.25, gain:0.6});
-      n.push({f:1760, start:z + 0.2, dur:0.45, gain:0.6});
-    }
-    return n;
-  }
-
-  function buildSounds(){
-    SND.tick  = makeSound([{f:880, start:0, dur:0.14, gain:0.55}]);
-    SND.end   = makeSound([{f:1320, start:0,    dur:0.25, gain:0.6},
-                           {f:1760, start:0.2,  dur:0.45, gain:0.6}]);
-    SND.final = makeSound([{f:660, start:0,    dur:0.5, gain:0.5},
-                           {f:523, start:0.32, dur:0.5, gain:0.5},
-                           {f:392, start:0.64, dur:1.4, gain:0.55},
-                           {f:262, start:0.66, dur:1.6, gain:0.4}]);
-    SND.cycle      = makeSound(cycleNotes(false), 2);
-    SND.cycleFinal = makeSound(cycleNotes(true), 2);
-
-    /* Piste silencieuse jouee en boucle pendant tout le minuteur : elle maintient
-       la session audio ouverte, sinon iOS la ferme apres quelques secondes et les
-       bips suivants sont avales. */
-    keepAlive = new Audio(renderWav([{f:1, start:0, dur:2, gain:0}]));
-    keepAlive.loop = true;
-    keepAlive.volume = 1;
-    keepAlive.setAttribute('playsinline', '');
-  }
-  /* Jeton de propriete : une lecture reelle "prend" l'element, ce qui neutralise
-     le rappel de deverrouillage encore en attente sur ce meme element. */
-  function claim(a){
-    a.__tok = (a.__tok || 0) + 1;
-    return a.__tok;
-  }
-  function silentStart(a){          // lance une lecture en ignorant un refus
+  function buildKeepAlive(){
     try{
-      var p = a.play();
-      if(p && p.catch) p.catch(function(){});
+      keepAlive = new Audio(silentWav(2));
+      keepAlive.loop = true;
+      keepAlive.volume = 1;
+      keepAlive.setAttribute('playsinline', '');
     }catch(e){}
   }
-  function unlockSounds(){          // a appeler DANS un geste utilisateur (iOS)
-    if(!soundOn) return;            // sons coupes : on ne touche a aucun element
+  function initAudio(){               // a appeler DANS un geste utilisateur (iOS)
+    if(!soundOn) return;
     /* iOS 16.4+ : sort l'appli de la categorie "ambiant", donc le son passe
        meme quand le bouton Silencieux de l'iPhone est active. */
     try{ if(navigator.audioSession) navigator.audioSession.type = 'playback'; }catch(e){}
-
-    for(var k in SND){
-      var list = SND[k].list;
-      for(var i = 0; i < list.length; i++) unlockOne(list[i]);
-    }
-  }
-
-  /* Deverrouillage silencieux. Un simple play() suivi de pause() laisse echapper
-     un fragment sonore sur mobile, ou play() est asynchrone : la lecture demarre
-     apres la pause. On coupe donc l'element le temps de l'operation, et on ne le
-     retablit qu'une fois la promesse de lecture resolue. */
-  function unlockOne(a){
-    var tok = claim(a);
-    try{
-      a.muted = true;
-      var restore = function(){
-        if(a.__tok !== tok) return;      // element repris entre-temps par une vraie lecture
-        try{ a.pause(); a.currentTime = 0; }catch(e){}
-        a.muted = false;
-      };
-      var p = a.play();
-      if(p && p.then) p.then(restore, restore);
-      else restore();
-    }catch(e){ a.muted = false; }
-  }
-  function paintSndBtn(){
-    sndBtn.classList.toggle('off', !soundOn);
-    sndBtn.setAttribute('aria-pressed', soundOn ? 'true' : 'false');
-    sndBtn.setAttribute('aria-label', soundOn ? 'Sons actives' : 'Sons coupes');
-    sndBtn.title = soundOn ? 'Sons activés' : 'Sons coupés';
+    audio();                          // creation / reprise du contexte
   }
   function holdSession(on){
     if(!keepAlive) return;
-    if(on && soundOn) silentStart(keepAlive);   // inutile de tenir la session si tout est coupe
-    else try{ keepAlive.pause(); }catch(e){}
-  }
-  /* Verrou unique : tick, fin de periode et carillon final passent tous par ici,
-     donc couper le son coupe reellement tout. */
-  function play(name){
-    if(!soundOn) return;
-    var s = SND[name]; if(!s) return;
-    var a = s.list[s.i];
-    s.i = (s.i + 1) % s.list.length;      // element suivant : jamais de collision
-    claim(a);
-    try{
-      a.muted = false;                    // au cas ou un deverrouillage l'ait coupe
-      if(a.currentTime) a.currentTime = 0;
-      silentStart(a);
-    }catch(e){}
-  }
-  function tickBeep(){ play('tick'); }
-  function endBeep(){ play('end'); }      // fin d'une repetition : deux notes aigues
-  function finalBeep(){ play('final'); }  // fin de serie : carillon grave descendant
-
-  /* Programme la sequence 3-2-1-0 de la periode en cours. `left` est le temps
-     restant au moment ou on s'en apercoit : on demarre le fichier a la position
-     correspondante, ce qui annule le retard de detection (au plus 50 ms). */
-  var armed = null, syncLeft = 0, seekWait = 0, seekComp = 0.04;
-  function armCycle(left){
-    if(!soundOn) return false;
-    var s = SND[(!infinite && round + 1 >= total) ? 'cycleFinal' : 'cycle'];
-    if(!s) return false;
-    var a = s.list[s.i];
-    s.i = (s.i + 1) % s.list.length;
-    claim(a);
-    try{
-      a.pause();
-      a.muted = false;
-      /* Position de depart dans le fichier. Elle vaut zero dans le cas normal :
-         on evite alors un seek, couteux et asynchrone sur mobile. */
-      var pos = (PRE + CD) - left / 1000;
-      if(pos > 0.02 || a.currentTime > 0.02) a.currentTime = Math.max(0, pos);
-      silentStart(a);
-      armed = a;
-      syncLeft = 6; seekWait = 0;         // recalages possibles, tous pendant le silence
-      return true;
-    }catch(e){ return false; }
-  }
-  /* Recalage : si la lecture a demarre en retard, on corrige la position pendant
-     le silence de tete, donc sans rien faire entendre. */
-  function syncCycle(left){
-    if(!armed) return;
-    var ideal = (PRE + CD) - left / 1000;
-    if(ideal < 0.15 || ideal > PRE - 0.12) return;      // hors du silence : on ne touche plus
-
-    var drift = armed.currentTime - ideal;              // negatif = lecture en retard
-
-    /* Un repositionnement n'est pas gratuit : il dure quelques dizaines de
-       millisecondes pendant lesquelles l'horloge avance, ce qui laissait un
-       retard residuel constant. On mesure ce cout apres coup et on vise
-       d'autant plus loin la fois suivante. L'appli s'etalonne ainsi sur
-       l'appareil, un telephone n'ayant pas la meme latence qu'un PC. */
-    if(seekWait > 0){
-      if(--seekWait === 0) seekComp = Math.min(0.3, Math.max(0, seekComp - drift));
-      return;
-    }
-    if(syncLeft > 0 && Math.abs(drift) > 0.02){
+    if(on && soundOn){
       try{
-        armed.currentTime = ideal + seekComp;
-        /* Ne pas exiger que la lecture ait demarre : c'est justement quand elle
-           tarde que le recalage est necessaire. */
-        if(armed.paused) silentStart(armed);
-        syncLeft--;
-        seekWait = 3;
+        var p = keepAlive.play();
+        if(p && p.catch) p.catch(function(){});
       }catch(e){}
+    }else{
+      try{ keepAlive.pause(); }catch(e){}
     }
   }
-  function disarmCycle(){
-    if(armed){
-      try{ armed.pause(); armed.currentTime = 0; }catch(e){}
-      armed = null;
-    }
-  }
-
   var canVibrate = typeof navigator.vibrate === 'function';   // faux sur iOS
   function vibrate(pattern){
     if(canVibrate){
@@ -473,7 +396,13 @@
   }
   document.addEventListener('visibilitychange', function(){
     if(document.visibilityState === 'visible'){
-      if(running){ lockScreen(); holdSession(true); }   // iOS coupe les deux en arriere-plan
+      if(running){
+        lockScreen(); holdSession(true);                // iOS coupe les deux en arriere-plan
+        audio();
+        /* Le contexte audio a pu etre suspendu : son horloge a decroche de
+           l'heure reelle, il faut reprogrammer la sequence. */
+        cycleArmed = false; disarmCycle();
+      }
       render();
     }
   });
@@ -615,10 +544,8 @@
       lastBeepSec = secLeft;
       vibrate(40);
     }
-    if(!cycleArmed && left > 0 && left <= (PRE + CD) * 1000){
+    if(!cycleArmed && left > 0 && left <= LEAD * 1000){
       cycleArmed = armCycle(left);
-    }else if(cycleArmed){
-      syncCycle(left);
     }
 
     if(left <= 0){
@@ -627,16 +554,15 @@
       var extra = Math.floor((-left) / period);
       round += 1 + extra;
 
-      /* Le top 0 est deja dans le fichier arme ; on ne joue le son isole que si
-         rien n'a pu etre programme (onglet endormi, son rallume trop tard). */
+      /* Le top 0 est deja programme sur l'horloge audio ; on ne declenche un son
+         immediat que si rien n'a pu l'etre (onglet endormi, son rallume tard). */
       var armedHere = cycleArmed;
       cycleArmed = false;
-      armed = null;
 
       if(!infinite && round >= total){                        // fin de la serie
         round = total;
-        /* extra > 0 : le fichier arme etait celui d'une periode intermediaire,
-           il n'a donc pas joue le carillon de fin de serie. */
+        /* extra > 0 : la sequence programmee etait celle d une periode intermediaire,
+           elle ne comportait donc pas le carillon de fin de serie. */
         if(!armedHere || extra > 0) finalBeep();
         vibrate([300, 120, 300, 120, 500]);
         finish();
@@ -670,7 +596,7 @@
   }
   function start(){
     clampInputs();
-    unlockSounds();                   // debloque l'audio sur mobile (geste utilisateur)
+    initAudio();                      // contexte audio cree ou repris (geste utilisateur)
     dispEl.classList.remove('done');
     paused = false; round = 0;
     cycleArmed = false; disarmCycle();
@@ -687,7 +613,7 @@
     render();
   }
   function resume(){                  // reprend la repetition en cours, sans repartir de zero
-    unlockSounds();                   // on est dans un geste utilisateur : on en profite
+    initAudio();                      // on est dans un geste utilisateur : on en profite
     paused = false;
     cycleArmed = false;
     deadline = Date.now() + remaining;
@@ -767,7 +693,7 @@
     soundOn = !soundOn;
     paintSndBtn();
     if(soundOn){
-      unlockSounds();                 // clic = geste utilisateur : on en profite pour iOS
+      initAudio();                    // clic = geste utilisateur : on en profite pour iOS
       if(running) holdSession(true);
       tickBeep();                     // confirmation audible du retour du son
     }else{
@@ -777,7 +703,7 @@
     clampInputs();
   });
 
-  buildSounds(); restore(); clampInputs(); render();
+  buildKeepAlive(); restore(); clampInputs(); render();
 })();
 </script>
 </body>
