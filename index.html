@@ -103,13 +103,33 @@
     background:var(--accent); border-radius:0 3px 3px 0;
   }
   #time{
-    font-family:var(--num); font-size:clamp(76px,30vw,168px); font-weight:700;
+    font-family:var(--num); font-size:1em; font-weight:700;
     line-height:1; font-variant-numeric:tabular-nums; letter-spacing:.01em;
   }
   #rounds{
     font-family:var(--num); font-size:14px; color:var(--dim);
     letter-spacing:.14em; text-transform:uppercase;
   }
+  /* L'icone suit la taille du chiffre. --u est la taille d'une unite de la grille
+     des icones (24 unites) : le script la cale pour que le coureur ait
+     exactement la hauteur des chiffres, et --dy aligne le centre de l'icone sur
+     celui des chiffres (la boite du texte reserve de la place sous la ligne de
+     base, son centre n'est donc pas celui des chiffres). Les valeurs par defaut
+     servent tant que le script n'a pas mesure la police. */
+  .clock{display:flex; align-items:center; gap:.12em; font-size:clamp(76px,30vw,168px)}
+  .phase{
+    --u:.034em; --dy:0px;
+    display:flex; align-items:center; justify-content:center; flex:0 0 auto;
+    width:calc(22.5 * var(--u)); height:calc(20.5 * var(--u));
+    transform:translateY(var(--dy)); color:var(--go);
+  }
+  .phase .ph-work{width:calc(16.5 * var(--u)); height:calc(20.5 * var(--u))}
+  .phase .ph-rest{width:calc(22.5 * var(--u)); height:calc(12.5 * var(--u)); display:none}
+  .display.rest .phase{color:var(--accent)}
+  .display.rest .phase .ph-work{display:none}
+  .display.rest .phase .ph-rest{display:block}
+  .display.rest #time{color:var(--accent)}
+  .display.done .phase{visibility:hidden}
   .display.warn #time{color:var(--stop)}
   .display.warn .bar{background:var(--stop)}
   .display.flash{background:#183327}
@@ -145,19 +165,19 @@
 
 <div class="setup">
   <div class="field">
-    <label for="min">Minutes</label>
-    <input id="min" class="value" type="number" inputmode="numeric" min="0" max="59" value="0">
+    <label for="work">Intervalle (s)</label>
+    <input id="work" class="value" type="number" inputmode="numeric" min="1" max="999" value="30">
     <div class="stepper">
-      <button data-step="min" data-d="-1" aria-label="moins une minute">&minus;</button>
-      <button data-step="min" data-d="1" aria-label="plus une minute">+</button>
+      <button data-step="work" data-d="-5" aria-label="intervalle : moins cinq secondes">&minus;</button>
+      <button data-step="work" data-d="5" aria-label="intervalle : plus cinq secondes">+</button>
     </div>
   </div>
   <div class="field">
-    <label for="sec">Secondes</label>
-    <input id="sec" class="value" type="number" inputmode="numeric" min="0" max="59" value="30">
+    <label for="rest">Repos (s)</label>
+    <input id="rest" class="value" type="number" inputmode="numeric" min="0" max="999" value="10">
     <div class="stepper">
-      <button data-step="sec" data-d="-5" aria-label="moins cinq secondes">&minus;</button>
-      <button data-step="sec" data-d="5" aria-label="plus cinq secondes">+</button>
+      <button data-step="rest" data-d="-5" aria-label="repos : moins cinq secondes">&minus;</button>
+      <button data-step="rest" data-d="5" aria-label="repos : plus cinq secondes">+</button>
     </div>
   </div>
 </div>
@@ -184,7 +204,27 @@
 </div>
 
 <div class="display" id="display">
-  <div id="time">00:30</div>
+  <div class="clock">
+    <span class="phase" id="phase" role="img" aria-label="Intervalle">
+      <!-- Intervalle : coureur (icone Tabler "run", licence MIT) -->
+      <svg class="ph-work" viewBox="2.75 1.75 16.5 20.5" fill="none" stroke="currentColor" stroke-width="2.5"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M12 4a1 1 0 1 0 2 0a1 1 0 1 0 -2 0"/>
+        <path d="M4 17l5 1l.75 -1.5"/>
+        <path d="M15 21l0 -4l-4 -3l1 -6"/>
+        <path d="M7 12l0 -3l5 -1l3 3l3 1"/>
+      </svg>
+      <!-- Repos : lit (icone Tabler "bed", licence MIT) -->
+      <svg class="ph-rest" viewBox="0.75 5.75 22.5 12.5" fill="none" stroke="currentColor" stroke-width="2.5"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M5 9a2 2 0 1 0 4 0a2 2 0 1 0 -4 0"/>
+        <path d="M22 17v-3h-20"/>
+        <path d="M2 8v9"/>
+        <path d="M12 14h10v-2a3 3 0 0 0 -3 -3h-7v5z"/>
+      </svg>
+    </span>
+    <div id="time">30</div>
+  </div>
   <div id="rounds">Répétition 0 / 8</div>
   <div class="gauges">
     <div id="pct">0 %</div>
@@ -216,13 +256,27 @@
 <script>
 (function(){
   var $ = function(id){ return document.getElementById(id); };
-  var minEl=$('min'), secEl=$('sec'), repsEl=$('reps'), repsInfEl=$('repsInf'),
+  var workEl=$('work'), restEl=$('rest'), repsEl=$('reps'), repsInfEl=$('repsInf'),
       infBtn=$('inf'), totEl=$('tot'), timeEl=$('time'), roundsEl=$('rounds'), barEl=$('bar'),
-      pctEl=$('pct'), repsBarEl=$('repsBar'), dispEl=$('display'),
+      pctEl=$('pct'), repsBarEl=$('repsBar'), dispEl=$('display'), phaseEl=$('phase'),
       startBtn=$('start'), resetBtn=$('reset'), sndBtn=$('snd');
 
   var soundOn = true;
-  var period=30000, total=8, infinite=false,
+  /* Une repetition = un intervalle (phase 'work') puis un repos (phase 'rest').
+     Un repos de 0 s est saute. */
+  var workMs=30000, restMs=10000, phase='work';
+  function segDur(ph){ return ph === 'rest' ? restMs : workMs; }
+  function repDur(){ return workMs + restMs; }
+  function isLastSeg(){
+    return !infinite && round + 1 >= total && (phase === 'rest' || restMs === 0);
+  }
+  /* Passe a la phase suivante ; renvoie vrai si la serie est terminee. */
+  function nextSeg(){
+    if(phase === 'work' && restMs > 0){ phase = 'rest'; return false; }
+    round++; phase = 'work';
+    return !infinite && round >= total;
+  }
+  var total=8, infinite=false,
       deadline=0, repStart=0, running=false, paused=false, remaining=0,
       round=0, tick=null, lastBeepSec=null, cycleArmed=false, wakeLock=null;
 
@@ -333,7 +387,7 @@
       var t = z - k;
       if(t > c.currentTime + 0.01) tickAt(t);
     }
-    if(!infinite && round + 1 >= total) finalAt(z);
+    if(isLastSeg()) finalAt(z);
     else endAt(z);
     return true;
   }
@@ -409,15 +463,15 @@
 
   /* ---------- Reglages ---------- */
   function clampInputs(){
-    var m = parseInt(minEl.value, 10) || 0;
-    var s = parseInt(secEl.value, 10) || 0;
+    var w = parseInt(workEl.value, 10) || 0;
+    var rs = parseInt(restEl.value, 10) || 0;
     var r = parseInt(repsEl.value, 10) || 0;
-    m = Math.min(59, Math.max(0, m));
-    s = Math.min(59, Math.max(0, s));
+    w = Math.min(999, Math.max(1, w));
+    rs = Math.min(999, Math.max(0, rs));
     r = Math.min(999, Math.max(1, r));
-    if(m * 60 + s < 1){ s = 1; }
-    minEl.value = m; secEl.value = s; repsEl.value = r;
-    period = (m * 60 + s) * 1000;
+    workEl.value = w; restEl.value = rs; repsEl.value = r;
+    workMs = w * 1000;
+    restMs = rs * 1000;
     total = r;
 
     repsEl.hidden = infinite;
@@ -428,21 +482,23 @@
     infBtn.classList.toggle('on', infinite);
     infBtn.setAttribute('aria-pressed', infinite ? 'true' : 'false');
 
-    var txt = infinite ? '∞' : fmtLong(period * total);
+    var txt = infinite ? '∞' : fmtLong(repDur() * total);
     totEl.textContent = txt;
     totEl.classList.toggle('long', txt.length > 5);
 
     try{
       localStorage.setItem('minuteur', JSON.stringify({
-        m:m, s:s, r:r, inf:infinite, snd:soundOn
+        w:w, rs:rs, r:r, inf:infinite, snd:soundOn
       }));
     }catch(e){}
   }
   function restore(){
     try{
       var o = JSON.parse(localStorage.getItem('minuteur') || '{}');
-      if(o.m != null) minEl.value = o.m;
-      if(o.s != null) secEl.value = o.s;
+      if(o.w != null) workEl.value = o.w;
+      else if(o.m != null || o.s != null)            // ancien format minutes / secondes
+        workEl.value = (o.m || 0) * 60 + (o.s || 0);
+      if(o.rs != null) restEl.value = o.rs;
       if(o.r != null) repsEl.value = o.r;
       if(o.inf != null) infinite = !!o.inf;
       if(o.snd != null) soundOn = !!o.snd;
@@ -451,10 +507,8 @@
   }
 
   /* ---------- Affichage ---------- */
-  function fmt(ms){
-    var t = Math.max(0, Math.ceil(ms / 1000));
-    var mm = Math.floor(t / 60), ss = t % 60;
-    return (mm < 10 ? '0' : '') + mm + ':' + (ss < 10 ? '0' : '') + ss;
+  function fmt(ms){                        // secondes uniquement
+    return String(Math.max(0, Math.ceil(ms / 1000)));
   }
   function fmtLong(ms){                    // duree totale : h:mm:ss au-dela d'une heure
     var t = Math.round(ms / 1000);
@@ -490,7 +544,7 @@
       repsCells.push(c);
     }
   }
-  function paintRepsBar(done){
+  function paintRepsBar(done){             // done : avancement de la repetition en cours (0..1)
     if(infinite || !repsCells.length) return;
 
     if(total > CELLS_MAX){
@@ -515,19 +569,51 @@
 
   function render(){
     var live = running || paused;
-    var left = running ? Math.max(0, deadline - Date.now()) : (paused ? remaining : period);
-    var done = live ? Math.max(0, Math.min(1, 1 - left / period)) : 0;
+    if(!live) phase = 'work';
+    var dur = segDur(phase);
+    var left = running ? Math.max(0, deadline - Date.now()) : (paused ? remaining : dur);
+    var done = live ? Math.max(0, Math.min(1, 1 - left / dur)) : 0;
+    /* Avancement dans la repetition : l'intervalle puis le repos. */
+    var repDone = live ? Math.max(0, Math.min(1,
+      ((phase === 'rest' ? workMs : 0) + dur - left) / repDur())) : 0;
     timeEl.textContent = fmt(left);
     barEl.style.width = (done * 100) + '%';
     pctEl.textContent = Math.round(done * 100) + ' %';
     roundsEl.textContent = 'Répétition ' + (live ? Math.min(round + 1, infinite ? round + 1 : total) : round)
                          + (infinite ? '' : ' / ' + total);
+    var isRest = phase === 'rest';
+    dispEl.classList.toggle('rest', isRest);
+    phaseEl.setAttribute('aria-label', isRest ? 'Repos' : 'Intervalle');
     buildRepsBar();
-    paintRepsBar(done);
+    paintRepsBar(repDone);
     if(running && left <= 3000) dispEl.classList.add('warn');
     else dispEl.classList.remove('warn');
     document.title = running ? fmt(left) + ' - Minuteur' : "Minuteur d'exercice";
   }
+  /* Cale l'icone de phase sur les chiffres : hauteur du coureur = hauteur des
+     chiffres, centres alignes. Mesure faite sur la police reellement chargee. */
+  var measureCtx = null;
+  function fitPhase(){
+    try{
+      var cs = getComputedStyle(timeEl), fs = parseFloat(cs.fontSize);
+      measureCtx = measureCtx || document.createElement('canvas').getContext('2d');
+      measureCtx.font = cs.fontWeight + ' ' + fs + 'px ' + cs.fontFamily;
+      var m = measureCtx.measureText('0123456789');
+      if(!m.actualBoundingBoxAscent || !m.fontBoundingBoxAscent) return;   // navigateur trop ancien
+      var asc = m.actualBoundingBoxAscent, desc = Math.max(0, m.actualBoundingBoxDescent);
+      /* Ligne de base dans la boite du texte (line-height 1) */
+      var base = (fs - (m.fontBoundingBoxAscent + m.fontBoundingBoxDescent)) / 2 + m.fontBoundingBoxAscent;
+      var center = base - (asc - desc) / 2;
+      phaseEl.style.setProperty('--u', ((asc + desc) / 20.5) + 'px');
+      phaseEl.style.setProperty('--dy', (center - fs / 2) + 'px');
+    }catch(e){}
+  }
+  window.addEventListener('resize', fitPhase);
+  if(document.fonts){
+    if(document.fonts.ready) document.fonts.ready.then(fitPhase);
+    if(document.fonts.addEventListener) document.fonts.addEventListener('loadingdone', fitPhase);
+  }
+
   function flash(){
     dispEl.classList.add('flash');
     setTimeout(function(){ dispEl.classList.remove('flash'); }, 250);
@@ -551,27 +637,34 @@
     if(left <= 0){
       /* Periodes entierement ecoulees pendant une mise en veille de l'onglet :
          elles comptent, sinon la serie deraillerait au reveil. */
-      var extra = Math.floor((-left) / period);
-      round += 1 + extra;
-
       /* Le top 0 est deja programme sur l'horloge audio ; on ne declenche un son
          immediat que si rien n'a pu l'etre (onglet endormi, son rallume tard). */
       var armedHere = cycleArmed;
       cycleArmed = false;
 
-      if(!infinite && round >= total){                        // fin de la serie
+      /* Phases entierement ecoulees pendant une mise en veille de l'onglet :
+         elles comptent, sinon la serie deraillerait au reveil. */
+      var now = Date.now(), skipped = 0, finished = false;
+      for(;;){
+        var segEnd = deadline;
+        if(nextSeg()){ finished = true; break; }
+        repStart = segEnd;                                   // pas de derive cumulee
+        deadline = segEnd + segDur(phase);
+        if(deadline > now) break;
+        skipped++;
+      }
+
+      if(finished){                                          // fin de la serie
         round = total;
-        /* extra > 0 : la sequence programmee etait celle d une periode intermediaire,
+        /* skipped > 0 : la sequence programmee etait celle d'une phase intermediaire,
            elle ne comportait donc pas le carillon de fin de serie. */
-        if(!armedHere || extra > 0) finalBeep();
+        if(!armedHere || skipped > 0) finalBeep();
         vibrate([300, 120, 300, 120, 500]);
         finish();
         return;
       }
       if(!armedHere) endBeep();
       vibrate([120, 60, 120]); flash();
-      repStart = deadline + extra * period;                  // pas de derive cumulee
-      deadline = repStart + period;
       lastBeepSec = null;
     }
     render();
@@ -598,10 +691,10 @@
     clampInputs();
     initAudio();                      // contexte audio cree ou repris (geste utilisateur)
     dispEl.classList.remove('done');
-    paused = false; round = 0;
+    paused = false; round = 0; phase = 'work';
     cycleArmed = false; disarmCycle();
     repStart = Date.now();
-    deadline = repStart + period;
+    deadline = repStart + workMs;
     run();
   }
   function pause(){
@@ -617,7 +710,7 @@
     paused = false;
     cycleArmed = false;
     deadline = Date.now() + remaining;
-    repStart = deadline - period;
+    repStart = deadline - segDur(phase);
     run();
   }
   function finish(){
@@ -625,6 +718,7 @@
     paused = false;
     startBtn.textContent = 'Démarrer';
     dispEl.classList.add('done');
+    dispEl.classList.remove('rest');
     barEl.style.width = '100%';
     paintRepsBar(1);
     timeEl.textContent = fmt(0);
@@ -635,7 +729,7 @@
   function reset(){
     halt();
     cycleArmed = false; disarmCycle();
-    paused = false; remaining = 0; round = 0;
+    paused = false; remaining = 0; round = 0; phase = 'work';
     startBtn.textContent = 'Démarrer';
     dispEl.classList.remove('done');
     clampInputs(); render();
@@ -652,11 +746,11 @@
       round = 0;
     }
     if(running){
-      deadline = Math.max(repStart + period, Date.now() + 250);
+      deadline = Math.max(repStart + segDur(phase), Date.now() + 250);
       lastBeepSec = null;
       cycleArmed = false; disarmCycle();   // l'echeance a bouge : sequence a reprogrammer
     }else if(paused){
-      remaining = Math.min(remaining, period);
+      remaining = Math.min(remaining, segDur(phase));
     }
     render();
   }
@@ -672,10 +766,9 @@
     b.addEventListener('click', function(){
       var which = b.getAttribute('data-step');
       if(which === 'reps' && infinite) return;
-      var el = which === 'min' ? minEl : which === 'sec' ? secEl : repsEl;
+      var el = which === 'work' ? workEl : which === 'rest' ? restEl : repsEl;
       var v = (parseInt(el.value, 10) || 0) + parseInt(b.getAttribute('data-d'), 10);
-      el.value = which === 'reps' ? Math.min(999, Math.max(1, v))
-                                  : Math.min(59, Math.max(0, v));
+      el.value = Math.min(999, Math.max(which === 'rest' ? 0 : 1, v));
       applyEdit();
     });
   });
@@ -684,7 +777,7 @@
     applyEdit();
   });
 
-  [minEl, secEl, repsEl].forEach(function(el){
+  [workEl, restEl, repsEl].forEach(function(el){
     el.addEventListener('change', applyEdit);
     el.addEventListener('focus', function(){ el.select(); });
   });
@@ -703,7 +796,7 @@
     clampInputs();
   });
 
-  buildKeepAlive(); restore(); clampInputs(); render();
+  buildKeepAlive(); restore(); clampInputs(); render(); fitPhase();
 })();
 </script>
 </body>
